@@ -1,7 +1,6 @@
 import streamlit as st
-import subprocess
-import platform
 import socket
+import time
 import re
 import streamlit.components.v1 as components
 
@@ -28,7 +27,7 @@ DESTINOS_SENSA = {
     "Sensa Edge 03": "smt-edge03.sensa.com.ar"
 }
 
-# Detectar si corre en los servidores de Streamlit Cloud o local
+# Detectar si es local (para saber si puede usar IPs privadas de ONT)
 es_local = "streamlit" not in socket.gethostname().lower()
 
 # --- BARRA LATERAL ---
@@ -40,40 +39,38 @@ todos_los_destinos = {**DESTINOS_GLOBALES, **DESTINOS_SENSA}
 if cache_local:
     todos_los_destinos["Caché Sensa Local"] = cache_local
 
-# --- FUNCIÓN PARA ANALIZAR LATENCIA ---
-def evaluar_latencia(resultado_texto):
-    """Analiza la salida del comando ping y determina el estado."""
-    if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower() or "unknown host" in resultado_texto.lower():
+# --- FUNCIÓN DE PING TCP MULTIPLATAFORMA (NATIVA) ---
+def tcp_ping(host, puerto=443, timeout=3):
+    """Mide la latencia simulando un ping mediante la apertura de un socket TCP (compatible con la nube)."""
+    inicio = time.time()
+    try:
+        # Resolver IP si pasan un dominio
+        ip_destino = socket.gethostbyname(host)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip_destino, puerto))
+        s.close()
+        duracion = (time.time() - inicio) * 1000  # Convertir a ms
+        return int(duracion), f"Conexión exitosa al puerto {puerto}."
+    except socket.timeout:
+        return None, "🔴 TIMEOUT - El servidor tardó demasiado en responder."
+    except Exception as e:
+        # Si el puerto 443 está cerrado pero el host respondió rápido denegando la entrada, el host está vivo
+        duracion = (time.time() - inicio) * 1000
+        if duracion < (timeout * 1000) - 100:
+            return int(duracion), f"Respuesta obtenida (Puerto cerrado/filtrado)."
+        return None, f"🔴 ERROR - No se pudo alcanzar el host: {str(e)}"
+
+def evaluar_rango(promedio):
+    if promedio is None:
         return "🔴 CORTE TOTAL / TIMEOUT", "error"
-    
-    # 1. Formato Windows (Media = XXms o Average = XXms)
-    valores_win = re.findall(r'(?:Media|Average|media|average) = (\d+)ms', resultado_texto)
-    if valores_win:
-        promedio = int(valores_win[-1])
-    else:
-        # 2. Formato Linux clásico (rtt min/avg/max/mdev)
-        valores_linux = re.findall(r'(?:rtt|round-trip)\s+min/avg/max/.+?=\s*[\d\.]+/([\d\.]+)/', resultado_texto)
-        if valores_linux:
-            promedio = int(float(valores_linux[0]))
-        else:
-            # 3. Formato por línea (time=XX ms o tiempo=XX ms)
-            valores_linea = re.findall(r'(?:time|tiempo)[=<]([\d\.]+)\s*ms', resultado_texto)
-            if valores_linea:
-                promedio = int(sum(float(x) for x in valores_linea) / len(valores_linea))
-            else:
-                # --- EL SALVAVIDAS EN LA NUBE ---
-                # Si el ping respondió bien pero la terminal de la nube tiene un formato raro que no pudimos leer:
-                if "ttl" in resultado_texto.lower() or "bytes" in resultado_texto.lower() or "received" in resultado_texto.lower():
-                    return "🟢 ONLINE - Servidor Responde Correctamente.", "success"
-                
-                return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
-    
     if promedio <= 25:
         return f"🟢 EXCELENTE ({promedio} ms) - Conexión ultra rápida.", "success"
     elif promedio <= 65:
         return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
     else:
         return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación o ruta congestionada.", "warning"
+
 # ==========================================
 # OPCIÓN 1: MODO CLIENTE (HTTP NAVEGADOR)
 # ==========================================
@@ -131,79 +128,50 @@ if modo == "Cliente (Web / Navegador)":
 # OPCIÓN 2: MODO LOCAL (TÉCNICO / NODO)
 # ==========================================
 else:
-    st.header("🛠️ Herramientas de Diagnóstico Técnico (ICMP y Trazas)")
+    st.header("🛠️ Herramientas de Diagnóstico Técnico (Sockets TCP)")
     
-    def ejecutar_comando(comando):
-        try:
-            resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
-            return resultado.stdout if resultado.stdout else resultado.stderr
-        except subprocess.TimeoutExpired:
-            return "❌ Error: Tiempo de espera agotado (Timeout)."
-        except Exception as e:
-            return f"❌ Error de ejecución: {str(e)}"
-
-    def ping_cmd(host, conteo=4):
-        param = '-n' if platform.system().lower() == 'windows' else '-c'
-        return ejecutar_comando(['ping', param, str(conteo), host])
-
-    def trace_cmd(host):
-        comando = ['tracert', host] if platform.system().lower() == 'windows' else ['traceroute', host]
-        return ejecutar_comando(comando)
-
     # --- SECCIÓN 1: ONT / ROUTER ---
     st.subheader("🏠 Verificación de Última Milla (Prueba 2: ONT / Gateway)")
-    
-    def detectar_gateway():
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip_loc = s.getsockname()[0]
-            s.close()
-            partes = ip_loc.split('.')
-            partes[-1] = '1'
-            return '.'.join(partes)
-        except:
-            return "192.168.1.1"
-
-    ip_ont = st.text_input("IP de la ONT o Router del Abonado:", value=detectar_gateway())
+    ip_ont = st.text_input("IP de la ONT o Router del Abonado:", value="192.168.0.1")
+    puerto_ont = st.number_input("Puerto administrativo de la ONT (80 para HTTP, 443 para HTTPS):", min_value=1, max_value=65535, value=80)
     
     if st.button("🔍 Testear Conectividad a ONT"):
-        # Validar si estamos intentando pingear una IP privada desde la nube
         es_ip_privada = ip_ont.startswith("192.168.") or ip_ont.startswith("10.") or ip_ont.startswith("172.")
         
         if not es_local and es_ip_privada:
-            st.error(f"⚠️ No se puede evaluar la ONT local ({ip_ont}) desde la Nube. Para hacer esta prueba a la ONT, debés correr esta app localmente en tu PC con 'streamlit run app.py'.")
+            st.error(f"⚠️ No se puede evaluar la ONT local ({ip_ont}) desde los servidores en la Nube. Para hacer esta prueba a la ONT, debés correr esta app localmente en tu PC con 'streamlit run app.py'.")
         else:
             with st.spinner("Analizando calidad del enlace con la ONT..."):
-                res_ont = ping_cmd(ip_ont)
-                msg, tipo = evaluar_latencia(res_ont)
-                if tipo == "success":
-                    st.success(f"Estado de la ONT: {msg}")
-                elif tipo == "warning":
-                    st.warning(f"Estado de la ONT: {msg}")
+                ms_ont, msg_ont = tcp_ping(ip_ont, puerto=int(puerto_ont))
+                msg_eval, tipo_eval = evaluar_rango(ms_ont)
+                
+                if tipo_eval == "success":
+                    st.success(f"Estado de la ONT: {msg_eval}")
+                elif tipo_eval == "warning":
+                    st.warning(f"Estado de la ONT: {msg_eval}")
                 else:
-                    st.error(f"Estado de la ONT: {msg}")
-                with st.expander("Ver salida detallada de la ONT"):
-                    st.code(res_ont)
+                    st.error(f"Estado de la ONT: {msg_eval}")
+                st.info(f"Detalle: {msg_ont}")
 
     st.markdown("---")
 
-    # --- SECCIÓN 2: PING CON EVALUACIÓN ---
-    st.subheader("🚀 Prueba 3 y 6: Ráfaga ICMP con Diagnóstico de Umbrales")
+    # --- SECCIÓN 2: MATRIZ CON SOCKETS ---
+    st.subheader("🚀 Prueba 3 y 6: Ráfaga TCP con Diagnóstico de Umbrales")
     cat_seleccionada = st.radio("Filtro de Destinos:", ["Solo Servidores Sensa", "Ver Todo (Sensa + Páginas Web)"], horizontal=True)
     dict_filtrado = DESTINOS_SENSA if cat_seleccionada == "Solo Servidores Sensa" else todos_los_destinos
     
     if cache_local and "Caché Sensa Local" not in dict_filtrado:
         dict_filtrado["Caché Sensa Local"] = cache_local
 
-    if st.button("⚡ Ejecutar Matriz ICMP"):
+    if st.button("⚡ Ejecutar Matriz"):
         columnas = st.columns(2)
         for idx, (nombre, host) in enumerate(dict_filtrado.items()):
             col = columnas[idx % 2]
             with col:
-                with st.spinner(f"Haciendo ping a {nombre}..."):
-                    resultado_ping = ping_cmd(host, conteo=4)
-                    msg_eval, tipo_eval = evaluar_latencia(resultado_ping)
+                with st.spinner(f"Analizando {nombre}..."):
+                    # Probamos por el puerto estándar seguro 443 (HTTPS)
+                    ms_resultado, detalle_resultado = tcp_ping(host, puerto=443)
+                    msg_eval, tipo_eval = evaluar_rango(ms_resultado)
                     
                     if "🟢" in msg_eval:
                         st.success(f"**{nombre}** ({host}) -> {msg_eval}")
@@ -211,22 +179,10 @@ else:
                         st.warning(f"**{nombre}** ({host}) -> {msg_eval}")
                     else:
                         st.error(f"**{nombre}** ({host}) -> {msg_eval}")
-                        
-                    with st.expander(f"Ver consola de {nombre}"):
-                        st.code(resultado_ping)
-
-    st.markdown("---")
-
-    # --- SECCIÓN 3: TRACEROUTE ---
-    st.subheader("🗺️ Prueba 4 y 7: Trazas de Ruta")
-    destino_para_trace = st.selectbox("Seleccioná el servidor a trazar:", list(dict_filtrado.keys()))
-    host_trace = dict_filtrado[destino_para_trace]
-    
-    if st.button("🗺️ Lanzar Traceroute"):
-        st.warning("Analizando la ruta salto por salto. Por favor aguardá...")
-        with st.spinner(f"Ejecutando traza hacia {destino_para_trace}..."):
-            resultado_trace = trace_cmd(host_trace)
-            st.code(resultado_trace)
+                    
+                    with st.expander("Ver bitácora técnica"):
+                        st.write(f"Destino evaluado: `{host}`")
+                        st.write(f"Resultado socket: {detalle_resultado}")
 
 # ==========================================
 # SECCIÓN GLOBAL DE CENTRALES DE ALERTA
