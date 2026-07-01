@@ -28,6 +28,7 @@ DESTINOS_SENSA = {
     "Sensa Edge 03": "smt-edge03.sensa.com.ar"
 }
 
+# Detectar si corre en los servidores de Streamlit Cloud o local
 es_local = "streamlit" not in socket.gethostname().lower()
 
 # --- BARRA LATERAL ---
@@ -45,32 +46,32 @@ def evaluar_latencia(resultado_texto):
     if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower():
         return "🔴 CORTE TOTAL / TIMEOUT", "error"
     
-    # 1. Intento para formato Windows (Media = XXms o Average = XXms)
+    # 1. Formato Windows (Media = XXms o Average = XXms)
     valores_win = re.findall(r'(?:Media|Average|media|average) = (\d+)ms', resultado_texto)
     if valores_win:
         promedio = int(valores_win[-1])
     else:
-        # 2. Intento para formato Linux (rtt min/avg/max/mdev = min/avg/max/mdev ms)
-        # Buscamos los números después del signo '=' o la barra '/'
+        # 2. Formato Linux (rtt min/avg/max/mdev)
         valores_linux = re.findall(r'(?:rtt|round-trip)\s+min/avg/max/.+?=\s*[\d\.]+/([\d\.]+)/', resultado_texto)
         if valores_linux:
             promedio = int(float(valores_linux[0]))
         else:
-            # 3. Tercer intento por si viene en formato "time=XX ms" línea por línea
+            # 3. Formato por línea (time=XX ms o tiempo=XX ms)
             valores_linea = re.findall(r'(?:time|tiempo)[=<]([\d\.]+)\s*ms', resultado_texto)
             if valores_linea:
-                # Sacamos un promedio matemático de las líneas obtenidas
                 promedio = int(sum(float(x) for x in valores_linea) / len(valores_linea))
             else:
+                # Si el ping respondió pero no cuadra la regex, asumimos respuesta viva genérica
+                if "ttl" in resultado_texto.lower() or "bytes=" in resultado_texto.lower():
+                    return "🟢 ONLINE - Responde (No se extrajo promedio)", "success"
                 return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
     
-    # Evaluación de los umbrales basados en el promedio obtenido
     if promedio <= 25:
         return f"🟢 EXCELENTE ({promedio} ms) - Conexión ultra rápida.", "success"
     elif promedio <= 65:
         return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
     else:
-        return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación, jitter o ruta congestionada.", "warning"
+        return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación o ruta congestionada.", "warning"
 
 # ==========================================
 # OPCIÓN 1: MODO CLIENTE (HTTP NAVEGADOR)
@@ -166,15 +167,23 @@ else:
     ip_ont = st.text_input("IP de la ONT o Router del Abonado:", value=detectar_gateway())
     
     if st.button("🔍 Testear Conectividad a ONT"):
-        with st.spinner("Analizando calidad del enlace con la ONT..."):
-            res_ont = ping_cmd(ip_ont)
-            msg, tipo = evaluar_latencia(res_ont)
-            if tipo == "success" or tipo == "warning":
-                st.success(f"Estado de la ONT: {msg}")
-            else:
-                st.error(f"Estado de la ONT: {msg}")
-            with st.expander("Ver salida detallada de la ONT"):
-                st.code(res_ont)
+        # Validar si estamos intentando pingear una IP privada desde la nube
+        es_ip_privada = ip_ont.startswith("192.168.") or ip_ont.startswith("10.") or ip_ont.startswith("172.")
+        
+        if not es_local and es_ip_privada:
+            st.error(f"⚠️ No se puede evaluar la ONT local ({ip_ont}) desde la Nube. Para hacer esta prueba a la ONT, debés correr esta app localmente en tu PC con 'streamlit run app.py'.")
+        else:
+            with st.spinner("Analizando calidad del enlace con la ONT..."):
+                res_ont = ping_cmd(ip_ont)
+                msg, tipo = evaluar_latencia(res_ont)
+                if tipo == "success":
+                    st.success(f"Estado de la ONT: {msg}")
+                elif tipo == "warning":
+                    st.warning(f"Estado de la ONT: {msg}")
+                else:
+                    st.error(f"Estado de la ONT: {msg}")
+                with st.expander("Ver salida detallada de la ONT"):
+                    st.code(res_ont)
 
     st.markdown("---")
 
@@ -195,7 +204,6 @@ else:
                     resultado_ping = ping_cmd(host, conteo=4)
                     msg_eval, tipo_eval = evaluar_latencia(resultado_ping)
                     
-                    # Mostrar cartel dinámico según el resultado analizado
                     if "🟢" in msg_eval:
                         st.success(f"**{nombre}** ({host}) -> {msg_eval}")
                     elif "🟡" in msg_eval or "🟠" in msg_eval:
