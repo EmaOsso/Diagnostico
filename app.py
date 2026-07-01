@@ -45,22 +45,32 @@ def evaluar_latencia(resultado_texto):
     if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower():
         return "🔴 CORTE TOTAL / TIMEOUT", "error"
     
-    # Expresión regular para buscar el promedio (ms) tanto en inglés como en español
-    valores = re.findall(r'(?:Media|Average|media|average) = (\d+)ms', resultado_texto)
-    if not valores:
-        # Intento alternativo por si tira líneas sueltas tipo "time=XXms"
-        valores = re.findall(r'(?:time|tiempo)[=<](\d+)\s*ms', resultado_texto)
-        
-    if valores:
-        promedio = int(valores[-1]) # Tomamos el último valor encontrado
-        if promedio <= 25:
-            return f"🟢 EXCELENTE ({promedio} ms) - Conexión ultra rápida.", "success"
-        elif promedio <= 65:
-            return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
+    # 1. Intento para formato Windows (Media = XXms o Average = XXms)
+    valores_win = re.findall(r'(?:Media|Average|media|average) = (\d+)ms', resultado_texto)
+    if valores_win:
+        promedio = int(valores_win[-1])
+    else:
+        # 2. Intento para formato Linux (rtt min/avg/max/mdev = min/avg/max/mdev ms)
+        # Buscamos los números después del signo '=' o la barra '/'
+        valores_linux = re.findall(r'(?:rtt|round-trip)\s+min/avg/max/.+?=\s*[\d\.]+/([\d\.]+)/', resultado_texto)
+        if valores_linux:
+            promedio = int(float(valores_linux[0]))
         else:
-            return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación, jitter o ruta congestionada.", "warning"
-            
-    return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
+            # 3. Tercer intento por si viene en formato "time=XX ms" línea por línea
+            valores_linea = re.findall(r'(?:time|tiempo)[=<]([\d\.]+)\s*ms', resultado_texto)
+            if valores_linea:
+                # Sacamos un promedio matemático de las líneas obtenidas
+                promedio = int(sum(float(x) for x in valores_linea) / len(valores_linea))
+            else:
+                return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
+    
+    # Evaluación de los umbrales basados en el promedio obtenido
+    if promedio <= 25:
+        return f"🟢 EXCELENTE ({promedio} ms) - Conexión ultra rápida.", "success"
+    elif promedio <= 65:
+        return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
+    else:
+        return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación, jitter o ruta congestionada.", "warning"
 
 # ==========================================
 # OPCIÓN 1: MODO CLIENTE (HTTP NAVEGADOR)
