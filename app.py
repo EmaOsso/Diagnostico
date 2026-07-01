@@ -43,7 +43,7 @@ if cache_local:
 # --- FUNCIÓN PARA ANALIZAR LATENCIA ---
 def evaluar_latencia(resultado_texto):
     """Analiza la salida del comando ping y determina el estado."""
-    if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower():
+    if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower() or "unknown host" in resultado_texto.lower():
         return "🔴 CORTE TOTAL / TIMEOUT", "error"
     
     # 1. Formato Windows (Media = XXms o Average = XXms)
@@ -51,7 +51,7 @@ def evaluar_latencia(resultado_texto):
     if valores_win:
         promedio = int(valores_win[-1])
     else:
-        # 2. Formato Linux (rtt min/avg/max/mdev)
+        # 2. Formato Linux clásico (rtt min/avg/max/mdev)
         valores_linux = re.findall(r'(?:rtt|round-trip)\s+min/avg/max/.+?=\s*[\d\.]+/([\d\.]+)/', resultado_texto)
         if valores_linux:
             promedio = int(float(valores_linux[0]))
@@ -61,9 +61,11 @@ def evaluar_latencia(resultado_texto):
             if valores_linea:
                 promedio = int(sum(float(x) for x in valores_linea) / len(valores_linea))
             else:
-                # Si el ping respondió pero no cuadra la regex, asumimos respuesta viva genérica
-                if "ttl" in resultado_texto.lower() or "bytes=" in resultado_texto.lower():
-                    return "🟢 ONLINE - Responde (No se extrajo promedio)", "success"
+                # --- EL SALVAVIDAS EN LA NUBE ---
+                # Si el ping respondió bien pero la terminal de la nube tiene un formato raro que no pudimos leer:
+                if "ttl" in resultado_texto.lower() or "bytes" in resultado_texto.lower() or "received" in resultado_texto.lower():
+                    return "🟢 ONLINE - Servidor Responde Correctamente.", "success"
+                
                 return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
     
     if promedio <= 25:
@@ -72,7 +74,6 @@ def evaluar_latencia(resultado_texto):
         return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
     else:
         return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación o ruta congestionada.", "warning"
-
 # ==========================================
 # OPCIÓN 1: MODO CLIENTE (HTTP NAVEGADOR)
 # ==========================================
