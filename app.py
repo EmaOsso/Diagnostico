@@ -2,7 +2,7 @@ import streamlit as st
 import subprocess
 import platform
 import socket
-import time
+import re
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Diagnóstico de Red & Sensa", layout="wide", page_icon="🌐")
@@ -10,7 +10,7 @@ st.set_page_config(page_title="Diagnóstico de Red & Sensa", layout="wide", page
 st.title("🌐 Panel de Diagnóstico Integral - Sensa & Redes")
 st.markdown("Herramienta basada en los procedimientos oficiales de verificación de COLSECOR.")
 
-# --- DICCIONARIO DE DESTINOS ACTUALIZADO (Sensa + Globales) ---
+# --- DICCIONARIO DE DESTINOS ---
 DESTINOS_GLOBALES = {
     "Google DNS": "8.8.8.8",
     "Cloudflare DNS": "1.1.1.1",
@@ -28,31 +28,47 @@ DESTINOS_SENSA = {
     "Sensa Edge 03": "smt-edge03.sensa.com.ar"
 }
 
-# --- DETECCIÓN DE ENTORNO ---
 es_local = "streamlit" not in socket.gethostname().lower()
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
 modo = st.sidebar.radio("Seleccionar Modo:", ["Cliente (Web / Navegador)", "Local (Técnico / Nodo / ONT)"])
+cache_local = st.sidebar.text_input("Caché Sensa Local / Regional (Opcional):", value="", placeholder="Ej: 10.0.0.50")
 
-cache_local = st.sidebar.text_input("Caché Sensa Local / Regional (Opcional):", value="", placeholder="Ej: 10.0.0.50 o cache.asociada.com")
-
-if modo == "Local (Técnico / Nodo / ONT)" and not es_local:
-    st.sidebar.warning("⚠️ Modo Nube detectado. Las pruebas de la pestaña 'Local' se ejecutarán desde los servidores de Streamlit Cloud.")
-
-# Unificar destinos según lo configurado
 todos_los_destinos = {**DESTINOS_GLOBALES, **DESTINOS_SENSA}
 if cache_local:
     todos_los_destinos["Caché Sensa Local"] = cache_local
 
+# --- FUNCIÓN PARA ANALIZAR LATENCIA ---
+def evaluar_latencia(resultado_texto):
+    """Analiza la salida del comando ping y determina el estado."""
+    if not resultado_texto or "unreachable" in resultado_texto.lower() or "lost = 4" in resultado_texto.lower() or "100% loss" in resultado_texto.lower() or "tiempo de espera agotado" in resultado_texto.lower():
+        return "🔴 CORTE TOTAL / TIMEOUT", "error"
+    
+    # Expresión regular para buscar el promedio (ms) tanto en inglés como en español
+    valores = re.findall(r'(?:Media|Average|media|average) = (\d+)ms', resultado_texto)
+    if not valores:
+        # Intento alternativo por si tira líneas sueltas tipo "time=XXms"
+        valores = re.findall(r'(?:time|tiempo)[=<](\d+)\s*ms', resultado_texto)
+        
+    if valores:
+        promedio = int(valores[-1]) # Tomamos el último valor encontrado
+        if promedio <= 25:
+            return f"🟢 EXCELENTE ({promedio} ms) - Conexión ultra rápida.", "success"
+        elif promedio <= 65:
+            return f"🟡 NORMAL ({promedio} ms) - Valores estables para navegación y streaming.", "warning"
+        else:
+            return f"🟠 LATENCIA ALTA ({promedio} ms) - Posible saturación, jitter o ruta congestionada.", "warning"
+            
+    return "⚪ No se pudo calcular el promedio (revisar consola inferior).", "info"
+
 # ==========================================
-# OPCIÓN 1: MODO CLIENTE (HTTP PING DESDE NAVEGADOR)
+# OPCIÓN 1: MODO CLIENTE (HTTP NAVEGADOR)
 # ==========================================
 if modo == "Cliente (Web / Navegador)":
     st.header("⚡ Prueba 1 y 2: Latencia desde el Navegador del Usuario")
-    st.info("Mide el tiempo de respuesta HTTP aproximado desde el dispositivo final (Smart TV, PC o Celular) hacia la infraestructura.")
+    st.info("Mide el tiempo de respuesta HTTP aproximado desde el dispositivo final hacia la infraestructura.")
     
-    # Construcción dinámica de destinos para JS
     js_destinos = "{\n"
     for nombre, host in todos_los_destinos.items():
         url = host if host.startswith("http") else f"https://{host}"
@@ -74,15 +90,15 @@ if modo == "Cliente (Web / Navegador)":
         try {{
             await fetch(url, {{ mode: 'no-cors', cache: 'no-store' }});
             const duration = Math.round(performance.now() - start);
-            let color = duration < 50 ? '#2ecc71' : (duration < 120 ? '#f1c40f' : '#e74c3c');
-            list.innerHTML += `<li>✅ <strong>${{name}}:</strong> <span style="color:${{color}}; font-weight:bold;">${{duration}} ms</span></li>`;
+            let info = duration <= 25 ? '<span style="color:#2ecc71;">🟢 EXCELENTE</span>' : (duration <= 65 ? '<span style="color:#f1c40f;">🟡 NORMAL</span>' : '<span style="color:#e67e22;">🟠 ALTA</span>');
+            list.innerHTML += `<li><strong>${{name}}:</strong> ${{info}} (${{duration}} ms)</li>`;
         }} catch (error) {{
             const duration = Math.round(performance.now() - start);
             if (duration < 200) {{
-                let color = duration < 50 ? '#2ecc71' : '#f1c40f';
-                list.innerHTML += `<li>✅ <strong>${{name}}:</strong> <span style="color:${{color}}; font-weight:bold;">${{duration}} ms (HTTP Ack)</span></li>`;
+                let info = duration <= 25 ? '<span style="color:#2ecc71;">🟢 EXCELENTE</span>' : '<span style="color:#f1c40f;">🟡 NORMAL</span>';
+                list.innerHTML += `<li><strong>${{name}}:</strong> ${{info}} (${{duration}} ms) (HTTP Ack)</li>`;
             }} else {{
-                list.innerHTML += `<li>❌ <strong>${{name}}:</strong> <span style="color:#e74c3c; font-weight:bold;">Error / Tiempo de espera agotado</span></li>`;
+                list.innerHTML += `<li><strong>${{name}}:</strong> <span style="color:#e74c3c; font-weight:bold;">🔴 TIMEOUT / CAÍDO</span></li>`;
             }}
         }}
     }}
@@ -93,24 +109,21 @@ if modo == "Cliente (Web / Navegador)":
             await ping(name, url);
         }}
     }}
-    
     runAll();
     </script>
     """
-    
     if st.button("▶️ Iniciar Verificación de Usuario Final"):
         components.html(js_code, height=400)
 
 # ==========================================
-# OPCIÓN 2: MODO LOCAL (DIAGNÓSTICO ICMP / ONT / TRAZAS)
+# OPCIÓN 2: MODO LOCAL (TÉCNICO / NODO)
 # ==========================================
 else:
     st.header("🛠️ Herramientas de Diagnóstico Técnico (ICMP y Trazas)")
-    st.markdown("Cumple con las **Pruebas 2, 3, 4, 6 y 7** de la guía oficial de COLSECOR para detección de buffereo.")
     
     def ejecutar_comando(comando):
         try:
-            resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
             return resultado.stdout if resultado.stdout else resultado.stderr
         except subprocess.TimeoutExpired:
             return "❌ Error: Tiempo de espera agotado (Timeout)."
@@ -140,22 +153,23 @@ else:
         except:
             return "192.168.1.1"
 
-    ip_ont = st.text_input("IP de la ONT o Router del Abonado:", value=detector_gateway())
+    ip_ont = st.text_input("IP de la ONT o Router del Abonado:", value=detectar_gateway())
     
     if st.button("🔍 Testear Conectividad a ONT"):
         with st.spinner("Analizando calidad del enlace con la ONT..."):
             res_ont = ping_cmd(ip_ont)
-            st.code(res_ont)
-            if "ms" in res_ont or "ttl" in res_ont.lower():
-                st.success("🟢 Enlace LAN/WiFi con la ONT stable. Si hay degradación, es un tema de la fibra o del transporte superior.")
+            msg, tipo = evaluar_latencia(res_ont)
+            if tipo == "success" or tipo == "warning":
+                st.success(f"Estado de la ONT: {msg}")
             else:
-                st.error("🔴 Pérdida total hacia la ONT. Revisar cableado, potencia óptica o saturación del equipo local.")
+                st.error(f"Estado de la ONT: {msg}")
+            with st.expander("Ver salida detallada de la ONT"):
+                st.code(res_ont)
 
     st.markdown("---")
 
-    # --- SECCIÓN 2: PING CDN & AWS ---
-    st.subheader("🚀 Prueba 3 y 6: Ráfaga ICMP a Infraestructura Sensa y Red")
-    
+    # --- SECCIÓN 2: PING CON EVALUACIÓN ---
+    st.subheader("🚀 Prueba 3 y 6: Ráfaga ICMP con Diagnóstico de Umbrales")
     cat_seleccionada = st.radio("Filtro de Destinos:", ["Solo Servidores Sensa", "Ver Todo (Sensa + Páginas Web)"], horizontal=True)
     dict_filtrado = DESTINOS_SENSA if cat_seleccionada == "Solo Servidores Sensa" else todos_los_destinos
     
@@ -169,22 +183,49 @@ else:
             with col:
                 with st.spinner(f"Haciendo ping a {nombre}..."):
                     resultado_ping = ping_cmd(host, conteo=4)
-                    if "ttl" in resultado_ping.lower() or "tiempo=" in resultado_ping.lower() or "time=" in resultado_ping.lower():
-                        st.success(f"🟢 {nombre} ({host}) - Responde")
+                    msg_eval, tipo_eval = evaluar_latencia(resultado_ping)
+                    
+                    # Mostrar cartel dinámico según el resultado analizado
+                    if "🟢" in msg_eval:
+                        st.success(f"**{nombre}** ({host}) -> {msg_eval}")
+                    elif "🟡" in msg_eval or "🟠" in msg_eval:
+                        st.warning(f"**{nombre}** ({host}) -> {msg_eval}")
                     else:
-                        st.error(f"🔴 {nombre} ({host}) - Sin respuesta / Jitter alto")
+                        st.error(f"**{nombre}** ({host}) -> {msg_eval}")
+                        
                     with st.expander(f"Ver consola de {nombre}"):
                         st.code(resultado_ping)
 
     st.markdown("---")
 
     # --- SECCIÓN 3: TRACEROUTE ---
-    st.subheader("🗺️ Prueba 4 y 7: Trazas de Ruta (Detección de saltos/saturación)")
+    st.subheader("🗺️ Prueba 4 y 7: Trazas de Ruta")
     destino_para_trace = st.selectbox("Seleccioná el servidor a trazar:", list(dict_filtrado.keys()))
     host_trace = dict_filtrado[destino_para_trace]
     
     if st.button("🗺️ Lanzar Traceroute"):
-        st.warning("Analizando la ruta salto por salto. Esto puede demorar hasta 40 segundos...")
-        with st.spinner(f"Ejecutando traza hacia {destino_para_trace} ({host_trace})..."):
+        st.warning("Analizando la ruta salto por salto. Por favor aguardá...")
+        with st.spinner(f"Ejecutando traza hacia {destino_para_trace}..."):
             resultado_trace = trace_cmd(host_trace)
             st.code(resultado_trace)
+
+# ==========================================
+# SECCIÓN GLOBAL DE CENTRALES DE ALERTA
+# ==========================================
+st.markdown("---")
+st.subheader("🚨 Central de Verificación de Caídas Globales")
+st.markdown("Si detectás timeouts constantes en las pruebas superiores, usá estos accesos directos para verificar si el problema es masivo:")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown("**Infraestructura Sensa / Redes**")
+    st.link_button("🌐 Soporte COLSECOR (Tickets)", "https://soporte.colsecor.com.ar")
+    st.link_button("☁️ AWS Service Health (Middleware Sensa)", "https://health.aws.amazon.com")
+with col2:
+    st.markdown("**Servicios de Distribución**")
+    st.link_button("📺 Downdetector: YouTube", "https://downdetector.com.ar/problemas/youtube/")
+    st.link_button("🔍 Google Workspace Status", "https://www.google.com/appsstatus")
+with col3:
+    st.markdown("**Redes Sociales Externas**")
+    st.link_button("📸 Downdetector: Instagram", "https://downdetector.com.ar/problemas/instagram/")
+    st.link_button("📘 Downdetector: Facebook", "https://downdetector.com.ar/problemas/facebook/")
