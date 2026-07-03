@@ -6,7 +6,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="Monitoreo Sensa - NOC", layout="wide", page_icon="📊")
 
-# --- CREDENCIALES DE SUPABASE (YA INTEGRADAS) ---
+# --- CREDENCIALES DE SUPABASE ---
 SUPABASE_URL = "https://jnjovzeihdfbxczqmrlv.supabase.co"
 SUPABASE_KEY = "sb_publishable_0WZZihnXo8o77WUmfEFNcA_7CXjythL"
 
@@ -19,22 +19,21 @@ supabase = init_supabase()
 st.title("📊 Centro de Operaciones de Red (NOC) - Sensa TV")
 st.markdown("Historial de estabilidad, cortes y métricas de tráfico mapeadas desde el MikroTik.")
 
-# --- BOTÓN PARA REFRESCAR DATOS ---
 if st.button("🔄 Actualizar Tablero"):
     st.rerun()
 
 # --- CONSULTA DE DATOS A SUPABASE ---
 def cargar_datos():
     try:
-        # CORRECCIÓN: Cambiado descending=True por desc=True
-        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", desc=True).limit(1000).execute()
+        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", desc=True).limit(1500).execute()
         if respuesta.data:
             df = pd.DataFrame(respuesta.data)
-            # Convertir la fecha a formato datetime y ajustar a zona horaria local
             df["created_at"] = pd.to_datetime(df["created_at"])
             df["Hora"] = df["created_at"].dt.strftime("%H:%M:%S")
             df["Fecha"] = df["created_at"].dt.strftime("%Y-%m-%d")
             df["Hora_Entera"] = df["created_at"].dt.hour
+            # Asegurar que la latencia sea numérica para los gráficos
+            df["latencia"] = pd.to_numeric(df["latencia"], errors='coerce')
             return df
         return pd.DataFrame()
     except Exception as e:
@@ -50,8 +49,6 @@ else:
     # 1. ESTADO ACTUAL (PANEL DE LUCES)
     # ==========================================
     st.subheader("🟢 Estado en Tiempo Real de los Servicios")
-    
-    # Obtener el último estado de cada host único
     ultimos_estados = df_metricas.sort_values("created_at").groupby("host").last().reset_index()
     
     columnas_luces = st.columns(len(ultimos_estados))
@@ -59,62 +56,84 @@ else:
         with columnas_luces[idx]:
             host_name = row["host"]
             estado_actual = row["estado"]
+            lat_actual = row["latencia"]
             fecha_cambio = row["created_at"].strftime("%d/%m %H:%M")
             
+            str_lat = f"{int(lat_actual)} ms" if not pd.isna(lat_actual) else "N/A"
+            
             if estado_actual == "UP":
-                st.success(f"**{host_name}**\n\n🟢 ONLINE\n\n_Último cambio: {fecha_cambio}_")
+                st.success(f"**{host_name}**\n\n🟢 ONLINE ({str_lat})\n\n_Muestreo: {fecha_cambio}_")
             else:
-                st.error(f"**{host_name}**\n\n🔴 DOWN / CORTE\n\n_Último cambio: {fecha_cambio}_")
+                st.error(f"**{host_name}**\n\n🔴 DOWN / CORTE\n\n_Muestreo: {fecha_cambio}_")
 
     st.markdown("---")
 
     # ==========================================
-    # 2. ANÁLISIS DE HORAS PICO Y MICRO-CORTES
+    # 2. GRÁFICO HISTÓRICO DE LATENCIAS (HORAS PICO)
     # ==========================================
-    st.subheader("⏳ Historial de Eventos e Incidentes Registrados")
+    st.subheader("📈 Evolución de Latencia y Comportamiento en Horas Pico")
+    st.markdown("Este gráfico analiza las variaciones de milisegundos en el tiempo. Picos altos en la curva indican congestión o saturación de rutas.")
     
+    # Filtramos solo los registros que tienen latencia válida (los que están UP)
+    df_lineas = df_metricas[df_metricas["latencia"].notna()].copy()
+    
+    if not df_lineas.empty:
+        fig_lineas = px.line(
+            df_lineas,
+            x="created_at",
+            y="latencia",
+            color="host",
+            title="Milisegundos (RTT) continuos por Servidor",
+            labels={"created_at": "Tiempo", "latencia": "Latencia (ms)", "host": "Servidor"},
+        )
+        fig_lineas.update_layout(template="plotly_dark", height=450)
+        st.plotly_chart(fig_lineas, use_container_width=True)
+    else:
+        st.info("Recolectando suficientes datos de latencia para dibujar las líneas continuas...")
+
+    st.markdown("---")
+
+    # ==========================================
+    # 3. ANÁLISIS DE CORTES E INCIDENTES
+    # ==========================================
     col_izq, col_der = st.columns([2, 1])
     
     with col_izq:
-        st.markdown("**Gráfico de Eventos en la Línea de Tiempo**")
-        # Gráfico interactivo para ver cuándo ocurren las caídas/levantadas
-        fig = px.scatter(
+        st.subheader("🚨 Historial de Eventos Registrados")
+        fig_puntos = px.scatter(
             df_metricas, 
             x="created_at", 
             y="host", 
             color="estado",
             color_discrete_map={"UP": "#2ecc71", "DOWN": "#e74c3c"},
-            title="Distribución de Estados en el Tiempo (Puntos rojos indican cortes)",
-            labels={"created_at": "Fecha y Hora", "host": "Servidor Evaluado", "estado": "Estado"},
+            title="Distribución de Estados (Puntos rojos indican caídas completas)",
+            labels={"created_at": "Fecha y Hora", "host": "Servidor", "estado": "Estado"},
         )
-        fig.update_layout(template="plotly_dark", height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        fig_puntos.update_layout(template="plotly_dark", height=350)
+        st.plotly_chart(fig_puntos, use_container_width=True)
 
     with col_der:
-        st.markdown("**Distribución por Hora del Día**")
-        # Histograma para ver en qué horas se concentran los reportes (frecuencia de cambios)
+        st.subheader("📊 Alertas por Franja Horaria")
         fig_horas = px.histogram(
-            df_metricas,
+            df_metricas[df_metricas["estado"] == "DOWN"],
             x="Hora_Entera",
-            color="estado",
-            color_discrete_map={"UP": "#2ecc71", "DOWN": "#e74c3c"},
-            title="Frecuencia de Alertas por Franja Horaria",
-            labels={"Hora_Entera": "Hora del Día (0-23)", "count": "Cantidad de Eventos"},
+            title="Concentración de Cortes según la Hora",
+            labels={"Hora_Entera": "Hora del Día (0-23)"},
+            color_discrete_sequence=["#e74c3c"],
             nbins=24
         )
-        fig_horas.update_layout(template="plotly_dark", height=400, showlegend=False)
-        st.plotly_chart(fig_horas, use_container_width=True)
+        fig_horas.update_layout(template="plotly_dark", height=350, showlegend=False)
+        if not df_metricas[df_metricas["estado"] == "DOWN"].empty:
+            st.plotly_chart(fig_horas, use_container_width=True)
+        else:
+            st.success("¡Sin cortes registrados en el historial de franjas!")
 
     st.markdown("---")
 
     # ==========================================
-    # 3. TABLA DE REGISTROS CRUDA
+    # 4. TABLA DE AUDITORÍA
     # ==========================================
     st.subheader("📋 Log de Auditoría Técnica")
-    st.markdown("Listado detallado de los últimos movimientos reportados por el router para adjuntar en reportes o auditorías:")
-    
-    # Formatear tabla limpia para visualización
-    tabla_limpia = df_metricas[["created_at", "host", "estado"]].copy()
-    tabla_limpia.columns = ["Fecha y Hora del Evento", "Servidor / Destino", "Estado Reportado"]
-    
-    st.dataframe(tabla_limpia, use_container_width=True, height=300)
+    tabla_limpia = df_metricas[["created_at", "host", "estado", "latencia"]].copy()
+    tabla_limpia.columns = ["Fecha y Hora", "Servidor / Destino", "Estado", "Latencia (ms)"]
+    st.dataframe(tabla_limpia, use_container_width=True, height=250)
