@@ -26,8 +26,8 @@ if st.button("🔄 Actualizar Tablero"):
 # --- CONSULTA DE DATOS A SUPABASE ---
 def cargar_datos():
     try:
-        # Traemos los últimos 1000 registros de la tabla
-        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", descending=True).limit(1000).execute()
+        # CORRECCIÓN: Cambiado descending=True por desc=True
+        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", desc=True).limit(1000).execute()
         if respuesta.data:
             df = pd.DataFrame(respuesta.data)
             # Convertir la fecha a formato datetime y ajustar a zona horaria local
