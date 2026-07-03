@@ -25,15 +25,23 @@ if st.button("🔄 Actualizar Tablero"):
 # --- CONSULTA DE DATOS A SUPABASE ---
 def cargar_datos():
     try:
-        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", desc=True).limit(1500).execute()
+        respuesta = supabase.table("metricas_sensa").select("*").order("created_at", desc=True).limit(2000).execute()
         if respuesta.data:
             df = pd.DataFrame(respuesta.data)
+            
+            # Forzar conversión limpia de fecha y redondear al minuto para alinear los hosts en el gráfico
             df["created_at"] = pd.to_datetime(df["created_at"])
-            df["Hora"] = df["created_at"].dt.strftime("%H:%M:%S")
+            df["created_at"] = df["created_at"].dt.round("min")
+            
+            df["Hora"] = df["created_at"].dt.strftime("%H:%M")
             df["Fecha"] = df["created_at"].dt.strftime("%Y-%m-%d")
             df["Hora_Entera"] = df["created_at"].dt.hour
-            # Asegurar que la latencia sea numérica para los gráficos
-            df["latencia"] = pd.to_numeric(df["latencia"], errors='coerce')
+            
+            # Extraer solo números limpios de la columna latencia por si quedó basura de formato anterior
+            df["latencia"] = pd.to_numeric(df.astype(str)["latencia"].str.extract(r'(\d+)', expand=False), errors='coerce')
+            
+            # Ordenar cronológicamente para que Plotly dibuje las líneas de corrido sin saltos
+            df = df.sort_values("created_at").reset_index(drop=True)
             return df
         return pd.DataFrame()
     except Exception as e:
@@ -74,7 +82,7 @@ else:
     st.subheader("📈 Evolución de Latencia y Comportamiento en Horas Pico")
     st.markdown("Este gráfico analiza las variaciones de milisegundos en el tiempo. Picos altos en la curva indican congestión o saturación de rutas.")
     
-    # Filtramos solo los registros que tienen latencia válida (los que están UP)
+    # Filtramos registros con latencia válida para el gráfico continuo
     df_lineas = df_metricas[df_metricas["latencia"].notna()].copy()
     
     if not df_lineas.empty:
@@ -135,5 +143,6 @@ else:
     # ==========================================
     st.subheader("📋 Log de Auditoría Técnica")
     tabla_limpia = df_metricas[["created_at", "host", "estado", "latencia"]].copy()
+    tabla_limpia = tabla_limpia.sort_values("created_at", ascending=False) # Mostrar lo más nuevo arriba en la tabla
     tabla_limpia.columns = ["Fecha y Hora", "Servidor / Destino", "Estado", "Latencia (ms)"]
     st.dataframe(tabla_limpia, use_container_width=True, height=250)
